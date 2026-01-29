@@ -1,41 +1,108 @@
 name: Build wheels
 
-on: [push]
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
 
 jobs:
   build_wheels:
     name: Build wheels on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: 
-          - ubuntu-20.04
-# Windows is broken
-#          - windows-2019
-          - macOS-10.15
+        os:
+          - ubuntu-22.04
+          - macos-13      # Intel
+          - macos-14      # Apple Silicon (M1)
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
-      # Used to host cibuildwheel
-      - uses: actions/setup-python@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Install cibuildwheel
-        run: python -m pip install cibuildwheel==2.2.2
+        run: python -m pip install cibuildwheel==2.23.3
 
       - name: Build wheels
         run: python -m cibuildwheel --output-dir wheelhouse
         env:
-          # Use the `build` frontend instead of `pip` to allow in-tree
-          # builds (which `pip` will eventually migrate to as well).
+          # Build for CPython 3.9-3.13
+          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
+          
+          # Skip PyPy
+          CIBW_SKIP: "pp*"
+          
+          # Use the `build` frontend
           CIBW_BUILD_FRONTEND: "build"
+          
+          # Linux: clean build directory
           CIBW_BEFORE_ALL_LINUX: |
             rm -rf build .eggs
+          
+          # macOS: Install automake via Homebrew
           CIBW_BEFORE_ALL_MACOS: |
             rm -rf build .eggs
             brew install automake
-          CIBW_SKIP: "pp*"
+          
+          # Build for native architecture on each runner + Linux aarch64
+          CIBW_ARCHS_LINUX: "auto aarch64"
+          CIBW_ARCHS_MACOS: "native"
+          
+          # Test the wheels
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: pytest {project}/tests -v
 
-      - uses: actions/upload-artifact@v2
+      - uses: actions/upload-artifact@v4
         with:
+          name: wheels-${{ matrix.os }}
           path: ./wheelhouse/*.whl
+
+  build_sdist:
+    name: Build source distribution
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y automake libtool pkg-config libffi-dev
+          python -m pip install build
+
+      - name: Build sdist
+        run: python -m build --sdist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish:
+    name: Publish to PyPI
+    needs: [build_wheels, build_sdist]
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: pypi
+      url: https://pypi.org/p/secp256k1
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
